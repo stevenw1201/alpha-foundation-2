@@ -3,7 +3,7 @@
 import math
 from datetime import date
 
-from news_sentiment.tools.index import compute_index, decayed_weight
+from news_sentiment.tools.index import compute_index, compute_index_range, decayed_weight
 
 LAMBDA = 0.231
 
@@ -360,3 +360,78 @@ class TestOutputStructure:
             profile=None, articles=[], macro_events=[],
         )
         assert result["index_value"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Date-range computation
+# ---------------------------------------------------------------------------
+class TestComputeIndexRange:
+    def test_single_day_range(self):
+        """Range with start == end returns a single result."""
+        articles = [{
+            "headline": "News",
+            "published_at": "2026-03-13",
+            "confidence": 0.8,
+            "impact": 0.7,
+            "final_score": 0.25,
+        }]
+        results = compute_index_range(
+            "TSLA", "2026-03-13", "2026-03-13",
+            profile=PROFILE, articles=articles, macro_events=[],
+        )
+        assert len(results) == 1
+        assert results[0]["as_of_date"] == "2026-03-13"
+        assert abs(results[0]["index_value"] - 0.25) < 1e-9
+
+    def test_multi_day_range_decay(self):
+        """Article decays over a 3-day range."""
+        articles = [{
+            "headline": "Day-zero news",
+            "published_at": "2026-03-11",
+            "confidence": 0.9,
+            "impact": 1.0,
+            "final_score": 0.40,
+        }]
+        results = compute_index_range(
+            "TSLA", "2026-03-11", "2026-03-13",
+            profile=PROFILE, articles=articles, macro_events=[],
+        )
+        assert len(results) == 3
+        # Day 0 — no decay
+        assert abs(results[0]["company_component"] - 0.40) < 1e-9
+        # Day 1
+        expected_d1 = 0.40 * math.exp(-LAMBDA * 1 / 1.0)
+        assert abs(results[1]["company_component"] - expected_d1) < 1e-9
+        # Day 2
+        expected_d2 = 0.40 * math.exp(-LAMBDA * 2 / 1.0)
+        assert abs(results[2]["company_component"] - expected_d2) < 1e-9
+
+    def test_reversed_range_returns_empty(self):
+        """start_date > end_date returns an empty list."""
+        results = compute_index_range(
+            "TSLA", "2026-03-15", "2026-03-13",
+            profile=PROFILE, articles=[], macro_events=[],
+        )
+        assert results == []
+
+    def test_range_includes_macro(self):
+        """Macro events are properly computed across the range."""
+        macro_events = [{
+            "headline": "Fed holds rates",
+            "published_at": "2026-03-11",
+            "confidence": 0.85,
+            "impact": 0.70,
+            "cluster_impacts": {"Mobility & Transport": -0.30},
+        }]
+        results = compute_index_range(
+            "TSLA", "2026-03-11", "2026-03-12",
+            profile=PROFILE, articles=[], macro_events=macro_events,
+        )
+        assert len(results) == 2
+        # Day 0
+        expected_d0 = -0.30 * 0.92 * 0.85
+        assert abs(results[0]["macro_component"] - expected_d0) < 1e-9
+        # Day 1 — decayed
+        weight = math.exp(-LAMBDA * 1 / 0.70)
+        expected_d1 = -0.30 * 0.92 * 0.85 * weight
+        assert abs(results[1]["macro_component"] - expected_d1) < 1e-9

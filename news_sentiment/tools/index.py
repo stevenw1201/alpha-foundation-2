@@ -15,6 +15,69 @@ DEFAULT_LOOKBACK = 14
 CONFIDENCE_FLOOR = 0.3
 
 
+def compute_index_range(
+    ticker: str,
+    start_date: date | str,
+    end_date: date | str,
+    lookback_days: int = DEFAULT_LOOKBACK,
+    decay_lambda: float = DEFAULT_LAMBDA,
+    *,
+    profile: dict | None = None,
+    articles: list[dict] | None = None,
+    macro_events: list[dict] | None = None,
+    data_dir: Path | None = None,
+) -> list[dict]:
+    """Compute the sentiment index for each day in [start_date, end_date].
+
+    Returns a list of index result dicts (one per day), ordered chronologically.
+    When *articles* or *macro_events* are injected, each day filters the same
+    pool by its own lookback window — no redundant disk reads.
+    """
+    if isinstance(start_date, str):
+        start_date = date.fromisoformat(start_date)
+    if isinstance(end_date, str):
+        end_date = date.fromisoformat(end_date)
+
+    if start_date > end_date:
+        return []
+
+    data_dir = Path(data_dir) if data_dir else _DATA_DIR
+
+    # Load profile once
+    if profile is None:
+        from news_sentiment.tools.profile import get_company_profile
+        profile = get_company_profile(ticker, data_dir=data_dir)
+
+    # Pre-load the full date range of articles and macro events so we don't
+    # hit disk once per day.  The widest window needed is end_date with its
+    # lookback reaching back to start_date - lookback_days.
+    if articles is None:
+        articles = _load_articles(
+            ticker, end_date, (end_date - start_date).days + lookback_days, data_dir,
+        )
+    if macro_events is None:
+        macro_events = _load_macro_events(
+            end_date, (end_date - start_date).days + lookback_days, data_dir,
+        )
+
+    results: list[dict] = []
+    num_days = (end_date - start_date).days + 1
+    for offset in range(num_days):
+        day = start_date + timedelta(days=offset)
+        result = compute_index(
+            ticker,
+            day,
+            lookback_days=lookback_days,
+            decay_lambda=decay_lambda,
+            profile=profile,
+            articles=articles,
+            macro_events=macro_events,
+        )
+        results.append(result)
+
+    return results
+
+
 def compute_index(
     ticker: str,
     as_of_date: date | str,
