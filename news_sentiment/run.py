@@ -6,6 +6,7 @@ Usage:
     python -m news_sentiment.run --ticker TSLA      # single ticker
     python -m news_sentiment.run --from 2026-03-10 --to 2026-03-13  # custom range
     python -m news_sentiment.run --skip-macro       # skip macro pipeline
+    python -m news_sentiment.run --lookback 20      # custom lookback window
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ from pathlib import Path
 import yaml
 
 from news_sentiment.agent import run_company_pipeline, run_macro_pipeline
+from news_sentiment.tools.chart import generate_index_chart, generate_universe_summary
 from news_sentiment.tools.index import compute_index
+from news_sentiment.tools.storage import save_index_result
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,7 +45,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--ticker", type=str, help="Run for a single ticker only")
     parser.add_argument("--from", dest="from_date", type=str, help="Start date YYYY-MM-DD")
     parser.add_argument("--to", dest="to_date", type=str, help="End date YYYY-MM-DD")
+    parser.add_argument("--lookback", type=int, help="Lookback days for index (default: from config)")
     parser.add_argument("--skip-macro", action="store_true", help="Skip the macro pipeline")
+    parser.add_argument("--skip-charts", action="store_true", help="Skip chart generation")
     parser.add_argument("--config", type=str, help="Path to config.yaml")
     args = parser.parse_args(argv)
 
@@ -54,6 +59,9 @@ def main(argv: list[str] | None = None) -> None:
     from_date = args.from_date or (
         date.fromisoformat(to_date) - timedelta(hours=lookback_hours)
     ).isoformat()
+
+    lookback_days = args.lookback or cfg.get("lookback_days", 14)
+    decay_lambda = cfg.get("decay_lambda", 0.231)
 
     # Ticker universe
     if args.ticker:
@@ -67,6 +75,7 @@ def main(argv: list[str] | None = None) -> None:
 
     logger.info("=== News Sentiment Daily Run ===")
     logger.info("Date range: %s to %s", from_date, to_date)
+    logger.info("Lookback: %d days | Lambda: %.3f", lookback_days, decay_lambda)
     logger.info("Tickers: %s", ", ".join(tickers))
 
     # --- Step 1: Macro pipeline (once) ---
@@ -98,8 +107,18 @@ def main(argv: list[str] | None = None) -> None:
 
         # --- Step 3: Compute final index ---
         try:
-            idx = compute_index(ticker, to_date)
+            idx = compute_index(
+                ticker, to_date,
+                lookback_days=lookback_days,
+                decay_lambda=decay_lambda,
+            )
             index_results.append(idx)
+
+            # Persist to index history for charting
+            save_index_result(idx)
+            logger.info("%s index: %+.4f (company: %+.4f, macro: %+.4f)",
+                        ticker, idx["index_value"],
+                        idx["company_component"], idx["macro_component"])
         except Exception:
             logger.exception("Index computation failed for %s", ticker)
 
@@ -129,6 +148,26 @@ def main(argv: list[str] | None = None) -> None:
                     print(f"  [Macro]   {c['contribution']:>+.4f}  ({c['days_old']}d ago)  {c['headline'][:60]}")
     else:
         print("\nNo index results to display.")
+
+    # --- Step 5: Charts ---
+    if not args.skip_charts and index_results:
+        logger.info("--- Generating Charts ---")
+        for idx in index_results:
+            ticker = idx["ticker"]
+            chart_path = generate_index_chart(ticker, days=lookback_days)
+            if chart_path:
+                logger.info("Chart saved: %s", chart_path)
+            else:
+                logger.warning("No chart data for %s", ticker)
+
+        if len(index_results) > 1:
+            summary_path = generate_universe_summary(
+                [idx["ticker"] for idx in index_results], to_date,
+            )
+            if summary_path:
+                logger.info("Universe summary saved: %s", summary_path)
+    elif args.skip_charts:
+        logger.info("Skipping charts (--skip-charts)")
 
 
 if __name__ == "__main__":

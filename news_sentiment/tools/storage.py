@@ -102,6 +102,52 @@ def store_macro_events(
     return written
 
 
+def save_index_result(
+    index_result: dict,
+    *,
+    data_dir: Path | None = None,
+) -> Path:
+    """Append an index result to the ticker's index history file.
+
+    Written to ``data/index/{TICKER}_index.json``.  Idempotent on
+    ``as_of_date`` — re-running for the same date overwrites.
+
+    Returns:
+        Path to the index history file.
+    """
+    data_dir = Path(data_dir) if data_dir else _DATA_DIR
+    index_dir = data_dir / "index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+
+    ticker = index_result["ticker"]
+    path = index_dir / f"{ticker}_index.json"
+    existing = _read_json_list(path)
+
+    # Upsert by as_of_date
+    by_date = {r["as_of_date"]: r for r in existing}
+    by_date[index_result["as_of_date"]] = index_result
+    # Sort chronologically
+    sorted_history = sorted(by_date.values(), key=lambda r: r["as_of_date"])
+
+    _write_json_list(path, sorted_history)
+    return path
+
+
+def load_index_history(
+    ticker: str,
+    *,
+    data_dir: Path | None = None,
+) -> list[dict]:
+    """Load the full index history for a ticker.
+
+    Returns:
+        List of index result dicts sorted by date, or [].
+    """
+    data_dir = Path(data_dir) if data_dir else _DATA_DIR
+    path = data_dir / "index" / f"{ticker}_index.json"
+    return _read_json_list(path)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
