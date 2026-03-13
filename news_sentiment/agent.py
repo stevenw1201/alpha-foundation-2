@@ -297,15 +297,17 @@ def _execute_tool(name: str, args: dict) -> str:
     if name == "get_company_profile":
         result = get_company_profile(args["ticker"])
     elif name == "fetch_company_news":
-        result = fetch_company_news(
+        articles = fetch_company_news(
             args["concept_uri"], args["from_date"], args["to_date"],
         )
+        result = _trim_articles_for_context(articles)
     elif name == "fetch_macro_news":
-        result = fetch_macro_news(
+        articles = fetch_macro_news(
             category_uris=args.get("category_uris"),
             from_date=args["from_date"],
             to_date=args["to_date"],
         )
+        result = _trim_articles_for_context(articles)
     elif name == "store_scored_articles":
         count = store_scored_articles(args["ticker"], args["articles"])
         result = {"stored": count}
@@ -323,6 +325,27 @@ def _execute_tool(name: str, args: dict) -> str:
         result = {"error": f"Unknown tool: {name}"}
 
     return json.dumps(result, default=str)
+
+
+# Max body length sent to the agent (chars).  Full bodies are thousands of
+# chars each — the agent only needs a lead paragraph to score sentiment.
+_MAX_BODY_CHARS = 500
+
+
+def _trim_articles_for_context(articles: list[dict]) -> list[dict]:
+    """Truncate article bodies so they fit in the context window.
+
+    The agent needs the headline, metadata, and enough of the body to make
+    a sentiment call — not the full text of every article.
+    """
+    trimmed = []
+    for art in articles:
+        out = dict(art)
+        body = out.get("body", "")
+        if len(body) > _MAX_BODY_CHARS:
+            out["body"] = body[:_MAX_BODY_CHARS] + "..."
+        trimmed.append(out)
+    return trimmed
 
 
 # ---------------------------------------------------------------------------
