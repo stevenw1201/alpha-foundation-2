@@ -1,0 +1,37 @@
+# config.yaml
+
+# NewsAPI.ai
+newsapi_key: "YOUR_KEY"
+newsapi_base_url: "https://eventregistry.org/api/v1"
+default_lang: "eng"
+source_rank_percentile: [0, 80]
+
+# Macro category URIs
+macro_categories:
+  - "dmoz/Business/Financial_Services/Banking"
+  - "news/Business"
+  - "dmoz/Society/Government"
+  - "dmoz/Business/International_Business_and_Trade"
+  - "dmoz/Science/Technology"
+  - "news/Economy"
+
+# Scoring
+decay_lambda: 0.231
+lookback_days: 14
+confidence_floor: 0.3
+tag_similarity_weights:
+  level_1: 0.6
+  level_2: 0.4
+
+# Date ranges
+company_news_lookback_hours: 24
+macro_news_lookback_hours: 24
+backfill_days: 30
+
+# Universe
+tickers:
+  - TSLA
+  - GOOGL
+  - NVDA
+  - MSFT
+  - META
