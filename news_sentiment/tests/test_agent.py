@@ -17,6 +17,9 @@ from news_sentiment.agent import (
     score_macro_events,
     SYSTEM_PROMPT,
     TOOL_DEFINITIONS,
+    MODEL,
+    SCORING_MODEL,
+    MACRO_SCORING_MODEL,
 )
 
 # ---------------------------------------------------------------------------
@@ -299,6 +302,18 @@ class TestAgentLoop:
 # Single-call scoring functions
 # ---------------------------------------------------------------------------
 
+class TestModelDefaults:
+    def test_scoring_model_is_haiku(self):
+        assert "haiku" in SCORING_MODEL
+
+    def test_macro_scoring_model_is_sonnet(self):
+        assert "sonnet" in MACRO_SCORING_MODEL
+
+    def test_model_is_sonnet(self):
+        """Legacy MODEL constant remains Sonnet."""
+        assert "sonnet" in MODEL
+
+
 class TestScoreCompanyArticles:
     def test_empty_articles_returns_empty(self):
         """No API call needed for empty input."""
@@ -340,6 +355,20 @@ class TestScoreCompanyArticles:
         assert "tools" not in call_kwargs.kwargs
 
     @patch("news_sentiment.agent.anthropic.Anthropic")
+    def test_uses_haiku_by_default(self, MockClient):
+        """Company scoring defaults to Haiku for cost efficiency."""
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text='[{"id": "a1"}]')],
+        )
+        MockClient.return_value.messages.create.return_value = mock_response
+
+        score_company_articles("TSLA", {"ticker": "TSLA"}, [{"uri": "a1", "title": "Test"}])
+
+        call_kwargs = MockClient.return_value.messages.create.call_args.kwargs
+        assert call_kwargs["model"] == SCORING_MODEL
+        assert "haiku" in call_kwargs["model"]
+
+    @patch("news_sentiment.agent.anthropic.Anthropic")
     def test_handles_code_fences(self, MockClient):
         """Model output wrapped in markdown fences is handled."""
         scored_json = '```json\n[{"id": "a1", "sentiment": 0.5}]\n```'
@@ -358,6 +387,20 @@ class TestScoreMacroEvents:
     def test_empty_articles_returns_empty(self):
         result = score_macro_events([])
         assert result == []
+
+    @patch("news_sentiment.agent.anthropic.Anthropic")
+    def test_uses_sonnet_by_default(self, MockClient):
+        """Macro scoring defaults to Sonnet for nuanced reasoning."""
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text='[{"id": "m1"}]')],
+        )
+        MockClient.return_value.messages.create.return_value = mock_response
+
+        score_macro_events([{"uri": "m1", "title": "Fed holds"}])
+
+        call_kwargs = MockClient.return_value.messages.create.call_args.kwargs
+        assert call_kwargs["model"] == MACRO_SCORING_MODEL
+        assert "sonnet" in call_kwargs["model"]
 
     @patch("news_sentiment.agent.anthropic.Anthropic")
     def test_single_call_scoring(self, MockClient):

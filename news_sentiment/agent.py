@@ -25,6 +25,8 @@ from news_sentiment.tools.index import compute_index
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-20250514"
+SCORING_MODEL = "claude-haiku-4-5-20251001"
+MACRO_SCORING_MODEL = "claude-sonnet-4-20250514"
 MAX_TURNS = 25
 
 # ---------------------------------------------------------------------------
@@ -505,7 +507,7 @@ def score_company_articles(
     profile: dict,
     articles: list[dict],
     *,
-    model: str = MODEL,
+    model: str = SCORING_MODEL,
 ) -> list[dict]:
     """Score company articles in a single Claude API call.
 
@@ -547,7 +549,7 @@ def score_company_articles(
 def score_macro_events(
     articles: list[dict],
     *,
-    model: str = MODEL,
+    model: str = MACRO_SCORING_MODEL,
 ) -> list[dict]:
     """Score macro news articles in a single Claude API call.
 
@@ -628,8 +630,8 @@ def run_company_pipeline(
     if not articles:
         return f"No articles found for {ticker} in {from_date} to {to_date}."
 
-    # Step 3: Score (single Claude API call)
-    scored = score_company_articles(ticker, profile, articles, model=model)
+    # Step 3: Score (single Claude API call — Haiku by default)
+    scored = score_company_articles(ticker, profile, articles)
     logger.info("[%s] Scored %d articles", ticker, len(scored))
 
     # Step 4: Store
@@ -670,8 +672,8 @@ def run_macro_pipeline(
     if not articles:
         return f"No macro articles found for {from_date} to {to_date}."
 
-    # Step 2: Score (single Claude API call — dedup + scoring in one pass)
-    scored = score_macro_events(articles, model=model)
+    # Step 2: Score (single Claude API call — Sonnet for nuanced macro reasoning)
+    scored = score_macro_events(articles)
     logger.info("Scored %d macro events", len(scored))
 
     # Step 3: Store
