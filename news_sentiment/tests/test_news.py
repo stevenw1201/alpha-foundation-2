@@ -22,6 +22,7 @@ _SAMPLE_API_RESPONSE = {
                 "dateTimePub": "2026-03-13T10:00:00Z",
                 "source": {"uri": "reuters.com", "title": "Reuters"},
                 "sentiment": 0.24,
+                "socialScore": 42,
                 "eventUri": "eng-12345",
                 "categories": [
                     {"uri": "dmoz/Business/Investing", "wgt": 85},
@@ -40,6 +41,7 @@ _SAMPLE_API_RESPONSE = {
                 "dateTimePub": "2026-03-13T14:00:00Z",
                 "source": {"uri": "wsj.com", "title": "Wall Street Journal"},
                 "sentiment": -0.15,
+                "socialScore": 187,
                 "eventUri": "eng-67890",
                 "categories": [
                     {"uri": "dmoz/Business/Financial_Services/Banking", "wgt": 95},
@@ -84,6 +86,7 @@ class TestFetchCompanyNews:
         assert art["source"] == {"uri": "reuters.com", "title": "Reuters"}
         assert art["eventUri"] == "eng-12345"
         assert art["sentiment"] == 0.24
+        assert art["socialScore"] == 42
 
     @patch("news_sentiment.tools.news.requests.post", side_effect=_mock_post)
     def test_categories_normalised(self, mock_post):
@@ -122,11 +125,14 @@ class TestFetchCompanyNews:
         assert body["dateStart"] == "2026-03-12"
         assert body["dateEnd"] == "2026-03-13"
         assert body["isDuplicateFilter"] == "skipDuplicates"
+        assert body["dataType"] == ["news"]
         assert body["lang"] == "eng"
         assert body["articlesSortBy"] == "date"
         assert body["articlesCount"] == 50
         assert body["includeArticleConcepts"] is True
         assert body["includeArticleCategories"] is True
+        assert body["includeArticleSentiment"] is True
+        assert body["includeArticleSocialScore"] is True
         assert body["resultType"] == "articles"
 
     @patch("news_sentiment.tools.news.requests.post", side_effect=_mock_post)
@@ -226,6 +232,7 @@ class TestEdgeCases:
         assert "body" not in art
         assert art["url"] == ""
         assert art["sentiment"] is None
+        assert art["socialScore"] is None
         assert art["eventUri"] is None
         assert art["categories"] == []
         assert art["concepts"] == []
