@@ -21,6 +21,7 @@ def compute_index_range(
     end_date: date | str,
     lookback_days: int = DEFAULT_LOOKBACK,
     decay_lambda: float = DEFAULT_LAMBDA,
+    macro_weight: float = 0.5,
     *,
     profile: dict | None = None,
     articles: list[dict] | None = None,
@@ -69,6 +70,7 @@ def compute_index_range(
             day,
             lookback_days=lookback_days,
             decay_lambda=decay_lambda,
+            macro_weight=macro_weight,
             profile=profile,
             articles=articles,
             macro_events=macro_events,
@@ -83,6 +85,7 @@ def compute_index(
     as_of_date: date | str,
     lookback_days: int = DEFAULT_LOOKBACK,
     decay_lambda: float = DEFAULT_LAMBDA,
+    macro_weight: float = 0.5,
     *,
     profile: dict | None = None,
     articles: list[dict] | None = None,
@@ -98,6 +101,9 @@ def compute_index(
         as_of_date: The date to compute the index for (ISO string or date).
         lookback_days: Hard cutoff — articles older than this are excluded.
         decay_lambda: Exponential decay rate.
+        macro_weight: Scaling factor applied after averaging macro contributions
+            (default 0.5).  Prevents the ambient macro signal from dominating
+            the company-specific component.
         profile: Company profile dict (from get_company_profile). Loaded from
             disk if not provided.
         articles: Pre-loaded scored articles. Read from data/articles/ if None.
@@ -106,6 +112,8 @@ def compute_index(
 
     Returns:
         Index result dict with company/macro decomposition and top contributors.
+        The macro_component is the weighted average of individual macro
+        contributions (not the sum), scaled by *macro_weight*.
     """
     if isinstance(as_of_date, str):
         as_of_date = date.fromisoformat(as_of_date)
@@ -182,7 +190,11 @@ def compute_index(
             "days_old": days,
         })
 
-    macro_sentiment = sum(c["contribution"] for c in macro_contributions)
+    if macro_contributions:
+        raw_avg = sum(c["contribution"] for c in macro_contributions) / len(macro_contributions)
+        macro_sentiment = raw_avg * macro_weight
+    else:
+        macro_sentiment = 0.0
 
     # --- Top contributors (sorted by absolute contribution, descending) ---
     top_company = sorted(

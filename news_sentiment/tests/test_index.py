@@ -217,8 +217,10 @@ class TestMacroComponent:
         # cluster_sum = (-0.15 * 92/100) + (-0.20 * 75/100) + (-0.10 * 84/100)
         #             = -0.138 + -0.15 + -0.084 = -0.372
         # contribution = -0.372 * 0.85 * 1.0 = -0.3162
+        # macro_component = avg(contributions) * macro_weight = -0.3162 * 0.5
         cluster_sum = (-0.15 * 0.92) + (-0.20 * 0.75) + (-0.10 * 0.84)
-        expected = cluster_sum * 0.85
+        raw_contribution = cluster_sum * 0.85
+        expected = raw_contribution * 0.5  # 1 event → avg = contribution; × macro_weight
         assert abs(result["macro_component"] - expected) < 1e-9
         assert result["macro_event_count"] == 1
 
@@ -259,7 +261,8 @@ class TestMacroComponent:
         )
         weight = math.exp(-LAMBDA * 2 / 0.70)
         cluster_sum = -0.30 * 0.92
-        expected = cluster_sum * 0.80 * weight
+        raw_contribution = cluster_sum * 0.80 * weight
+        expected = raw_contribution * 0.5  # 1 event → avg = contribution; × macro_weight
         assert abs(result["macro_component"] - expected) < 1e-9
 
     def test_macro_below_confidence_floor_excluded(self):
@@ -276,6 +279,92 @@ class TestMacroComponent:
         )
         assert result["macro_event_count"] == 0
         assert result["macro_component"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Macro accumulation bias fix
+# ---------------------------------------------------------------------------
+class TestMacroAveraging:
+    def test_five_events_similar_to_one_event(self):
+        """5 identical macro events should produce the same macro_component as 1.
+
+        Averaging means article count reflects media coverage intensity, not
+        actual economic impact.
+        """
+        single_event = {
+            "headline": "Fed holds rates steady",
+            "published_at": "2026-03-13",
+            "confidence": 0.85,
+            "impact": 0.70,
+            "cluster_impacts": {"Mobility & Transport": -0.30},
+        }
+        result_one = compute_index(
+            "TSLA", "2026-03-13",
+            profile=PROFILE, articles=[], macro_events=[single_event],
+        )
+        result_five = compute_index(
+            "TSLA", "2026-03-13",
+            profile=PROFILE, articles=[],
+            macro_events=[dict(single_event) for _ in range(5)],
+        )
+        assert abs(result_one["macro_component"] - result_five["macro_component"]) < 1e-9
+        assert result_one["macro_event_count"] == 1
+        assert result_five["macro_event_count"] == 5
+
+    def test_macro_component_equals_avg_times_weight(self):
+        """macro_component = mean(contributions) × macro_weight."""
+        events = [
+            {
+                "headline": "Fed decision",
+                "published_at": "2026-03-13",
+                "confidence": 0.90,
+                "impact": 0.80,
+                "cluster_impacts": {"Mobility & Transport": -0.40},
+            },
+            {
+                "headline": "Tariff announcement",
+                "published_at": "2026-03-13",
+                "confidence": 0.70,
+                "impact": 0.60,
+                "cluster_impacts": {"Mobility & Transport": -0.20},
+            },
+            {
+                "headline": "Jobs data surprise",
+                "published_at": "2026-03-13",
+                "confidence": 0.80,
+                "impact": 0.50,
+                "cluster_impacts": {"Mobility & Transport": 0.10},
+            },
+        ]
+        result = compute_index(
+            "TSLA", "2026-03-13",
+            profile=PROFILE, articles=[], macro_events=events,
+        )
+        # Same-day → weight = 1.0 for all
+        c1 = -0.40 * 0.92 * 0.90  # cluster_impact × relevance × confidence
+        c2 = -0.20 * 0.92 * 0.70
+        c3 = 0.10 * 0.92 * 0.80
+        raw_avg = (c1 + c2 + c3) / 3
+        expected = raw_avg * 0.5
+        assert abs(result["macro_component"] - expected) < 1e-9
+
+    def test_custom_macro_weight(self):
+        """Passing macro_weight=0.8 scales macro_component accordingly."""
+        events = [{
+            "headline": "Rate hike",
+            "published_at": "2026-03-13",
+            "confidence": 0.85,
+            "impact": 0.70,
+            "cluster_impacts": {"Mobility & Transport": -0.30},
+        }]
+        result = compute_index(
+            "TSLA", "2026-03-13",
+            macro_weight=0.8,
+            profile=PROFILE, articles=[], macro_events=events,
+        )
+        raw_contribution = -0.30 * 0.92 * 0.85
+        expected = raw_contribution * 0.8
+        assert abs(result["macro_component"] - expected) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +392,8 @@ class TestCombinedIndex:
             profile=PROFILE, articles=articles, macro_events=macro_events,
         )
         company = 0.30  # same day, weight=1
-        macro = -0.40 * 0.92 * 0.85  # cluster_sum * confidence * weight(=1)
+        raw_macro = -0.40 * 0.92 * 0.85  # cluster_sum * confidence * weight(=1)
+        macro = raw_macro * 0.5  # avg(1 event) × macro_weight
         assert abs(result["company_component"] - company) < 1e-9
         assert abs(result["macro_component"] - macro) < 1e-9
         assert abs(result["index_value"] - (company + macro)) < 1e-9
@@ -428,10 +518,12 @@ class TestComputeIndexRange:
             profile=PROFILE, articles=[], macro_events=macro_events,
         )
         assert len(results) == 2
-        # Day 0
-        expected_d0 = -0.30 * 0.92 * 0.85
+        # Day 0 — avg(1 event) × macro_weight
+        raw_d0 = -0.30 * 0.92 * 0.85
+        expected_d0 = raw_d0 * 0.5
         assert abs(results[0]["macro_component"] - expected_d0) < 1e-9
-        # Day 1 — decayed
+        # Day 1 — decayed, then avg × macro_weight
         weight = math.exp(-LAMBDA * 1 / 0.70)
-        expected_d1 = -0.30 * 0.92 * 0.85 * weight
+        raw_d1 = -0.30 * 0.92 * 0.85 * weight
+        expected_d1 = raw_d1 * 0.5
         assert abs(results[1]["macro_component"] - expected_d1) < 1e-9

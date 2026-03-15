@@ -19,6 +19,7 @@ macro_categories:
 decay_lambda: 0.231
 lookback_days: 14
 confidence_floor: 0.3
+macro_weight: 0.5
 tag_similarity_weights:
   level_1: 0.6
   level_2: 0.4
