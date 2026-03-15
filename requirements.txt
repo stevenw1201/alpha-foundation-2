@@ -1,0 +1,22 @@
+# Equity Research Agent — Python Dependencies
+# Install: pip install -r requirements.txt --break-system-packages
+
+# Data retrieval
+requests>=2.31.0
+databento>=0.40.0
+
+# Claude API (for batch processing)
+anthropic>=0.40.0
+
+# Diagram rendering
+graphviz>=0.20.0
+
+# Chart generation
+matplotlib>=3.8.0
+
+# PDF generation (primary)
+weasyprint>=60.0
+markdown>=3.5.0
+
+# Optional: enhanced markdown processing
+pymdown-extensions>=10.0
