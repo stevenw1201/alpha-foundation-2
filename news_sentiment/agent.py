@@ -292,6 +292,21 @@ TOOL_DEFINITIONS = [
 # Tool dispatch
 # ---------------------------------------------------------------------------
 
+# Keys to drop from articles before sending to the agent.  These are
+# NewsAPI.ai enrichment fields that the agent doesn't use for scoring —
+# it produces its own article_tags and scores tag_similarity against
+# the company profile loaded via get_company_profile.
+_STRIP_KEYS = {"categories", "concepts"}
+
+
+def _strip_article_metadata(articles: list[dict]) -> list[dict]:
+    """Remove bulky metadata the agent doesn't need for scoring."""
+    return [
+        {k: v for k, v in art.items() if k not in _STRIP_KEYS}
+        for art in articles
+    ]
+
+
 def _execute_tool(name: str, args: dict) -> str:
     """Execute a tool call and return the JSON-serialised result."""
     if name == "get_company_profile":
@@ -300,14 +315,14 @@ def _execute_tool(name: str, args: dict) -> str:
         articles = fetch_company_news(
             args["concept_uri"], args["from_date"], args["to_date"],
         )
-        result = articles
+        result = _strip_article_metadata(articles)
     elif name == "fetch_macro_news":
         articles = fetch_macro_news(
             category_uris=args.get("category_uris"),
             from_date=args["from_date"],
             to_date=args["to_date"],
         )
-        result = articles
+        result = _strip_article_metadata(articles)
     elif name == "store_scored_articles":
         count = store_scored_articles(args["ticker"], args["articles"])
         result = {"stored": count}

@@ -8,6 +8,7 @@ import pytest
 
 from news_sentiment.agent import (
     _execute_tool,
+    _strip_article_metadata,
     run_agent,
     run_company_pipeline,
     run_macro_pipeline,
@@ -115,6 +116,63 @@ class TestExecuteTool:
     def test_unknown_tool(self):
         result = json.loads(_execute_tool("nonexistent", {}))
         assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Article metadata stripping
+# ---------------------------------------------------------------------------
+
+class TestStripArticleMetadata:
+    def test_removes_categories_and_concepts(self):
+        articles = [{
+            "uri": "a1",
+            "title": "Test headline",
+            "source": {"uri": "reuters.com", "title": "Reuters"},
+            "categories": [{"uri": "dmoz/Business", "wgt": 85}],
+            "concepts": [{"uri": "http://en.wikipedia.org/wiki/Tesla", "type": "org"}],
+        }]
+        stripped = _strip_article_metadata(articles)
+        assert "categories" not in stripped[0]
+        assert "concepts" not in stripped[0]
+
+    def test_preserves_scoring_fields(self):
+        articles = [{
+            "uri": "a1",
+            "title": "Test headline",
+            "url": "https://example.com",
+            "dateTimePub": "2026-03-13T10:00:00Z",
+            "source": {"uri": "reuters.com", "title": "Reuters"},
+            "sentiment": 0.24,
+            "eventUri": "eng-12345",
+            "categories": [{"uri": "dmoz/Business", "wgt": 85}],
+            "concepts": [{"uri": "http://en.wikipedia.org/wiki/Tesla", "type": "org"}],
+        }]
+        stripped = _strip_article_metadata(articles)
+        art = stripped[0]
+        assert art["uri"] == "a1"
+        assert art["title"] == "Test headline"
+        assert art["url"] == "https://example.com"
+        assert art["source"]["uri"] == "reuters.com"
+        assert art["sentiment"] == 0.24
+        assert art["eventUri"] == "eng-12345"
+
+    @patch("news_sentiment.agent.fetch_company_news")
+    def test_dispatch_strips_metadata(self, mock_fn):
+        """fetch_company_news dispatch strips categories/concepts."""
+        mock_fn.return_value = [{
+            "uri": "a1",
+            "title": "News",
+            "categories": [{"uri": "dmoz/Business", "wgt": 85}],
+            "concepts": [{"uri": "http://en.wikipedia.org/wiki/X", "type": "org"}],
+        }]
+        result = json.loads(_execute_tool("fetch_company_news", {
+            "concept_uri": "http://example.com",
+            "from_date": "2026-03-12",
+            "to_date": "2026-03-13",
+        }))
+        assert "categories" not in result[0]
+        assert "concepts" not in result[0]
+        assert result[0]["uri"] == "a1"
 
 
 # ---------------------------------------------------------------------------
