@@ -1,0 +1,12 @@
+{
+  "TSLA": "http://en.wikipedia.org/wiki/Tesla,_Inc.",
+  "GOOGL": "http://en.wikipedia.org/wiki/Alphabet_Inc.",
+  "NVDA": "http://en.wikipedia.org/wiki/Nvidia",
+  "MSFT": "http://en.wikipedia.org/wiki/Microsoft",
+  "META": "http://en.wikipedia.org/wiki/Meta_Platforms",
+  "AMZN": "http://en.wikipedia.org/wiki/Amazon_(company)",
+  "JPM": "http://en.wikipedia.org/wiki/JPMorgan_Chase",
+  "AAPL": "http://en.wikipedia.org/wiki/Apple_Inc.",
+  "AVGO": "http://en.wikipedia.org/wiki/Broadcom_Inc.",
+  "LLY": "http://en.wikipedia.org/wiki/Eli_Lilly_and_Company"
+}
