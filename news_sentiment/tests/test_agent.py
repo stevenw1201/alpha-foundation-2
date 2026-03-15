@@ -1,4 +1,4 @@
-"""Tests for agent.py — validates tool dispatch, pipeline wiring, and agent loop with mocks."""
+"""Tests for agent.py — validates tool dispatch, scoring functions, and pipeline wiring."""
 
 import json
 from unittest.mock import patch, MagicMock
@@ -8,10 +8,13 @@ import pytest
 
 from news_sentiment.agent import (
     _execute_tool,
+    _parse_json_array,
     _strip_article_metadata,
     run_agent,
     run_company_pipeline,
     run_macro_pipeline,
+    score_company_articles,
+    score_macro_events,
     SYSTEM_PROMPT,
     TOOL_DEFINITIONS,
 )
@@ -176,7 +179,34 @@ class TestStripArticleMetadata:
 
 
 # ---------------------------------------------------------------------------
-# Agent loop (fully mocked Anthropic client)
+# JSON parsing helper
+# ---------------------------------------------------------------------------
+
+class TestParseJsonArray:
+    def test_plain_json(self):
+        result = _parse_json_array('[{"id": "a1"}]')
+        assert result == [{"id": "a1"}]
+
+    def test_with_code_fences(self):
+        text = '```json\n[{"id": "a1"}]\n```'
+        result = _parse_json_array(text)
+        assert result == [{"id": "a1"}]
+
+    def test_with_plain_fences(self):
+        text = '```\n[{"id": "a1"}]\n```'
+        result = _parse_json_array(text)
+        assert result == [{"id": "a1"}]
+
+    def test_with_whitespace(self):
+        result = _parse_json_array('  \n[{"id": "a1"}]  \n')
+        assert result == [{"id": "a1"}]
+
+    def test_empty_array(self):
+        assert _parse_json_array("[]") == []
+
+
+# ---------------------------------------------------------------------------
+# Agent loop (fully mocked Anthropic client — backward compat)
 # ---------------------------------------------------------------------------
 
 def _make_text_block(text):
@@ -266,25 +296,201 @@ class TestAgentLoop:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline wrappers
+# Single-call scoring functions
+# ---------------------------------------------------------------------------
+
+class TestScoreCompanyArticles:
+    def test_empty_articles_returns_empty(self):
+        """No API call needed for empty input."""
+        result = score_company_articles("TSLA", {"ticker": "TSLA"}, [])
+        assert result == []
+
+    @patch("news_sentiment.agent.anthropic.Anthropic")
+    def test_single_call_scoring(self, MockClient):
+        """Verifies single API call produces scored articles."""
+        scored_json = json.dumps([{
+            "id": "a1", "ticker": "TSLA", "headline": "Tesla earnings beat",
+            "source": "reuters.com", "url": "https://example.com",
+            "published_at": "2026-03-13T10:00:00Z",
+            "scored_at": "2026-03-13T15:00:00Z",
+            "event_uri": None,
+            "article_tags": ["earnings", "beat"],
+            "sentiment": 0.6, "confidence": 0.85, "impact": 0.7,
+            "tag_similarity": {"level_1_score": 0.8, "level_2_score": 0.7, "combined": 0.76},
+            "final_score": 0.273,
+        }])
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=scored_json)],
+        )
+        MockClient.return_value.messages.create.return_value = mock_response
+
+        profile = {"ticker": "TSLA", "l1_tags": [], "l2_clusters": []}
+        articles = [{"uri": "a1", "title": "Tesla earnings beat",
+                     "source": {"uri": "reuters.com"}}]
+
+        result = score_company_articles("TSLA", profile, articles)
+
+        assert len(result) == 1
+        assert result[0]["id"] == "a1"
+        assert result[0]["sentiment"] == 0.6
+        # Verify only ONE API call was made
+        assert MockClient.return_value.messages.create.call_count == 1
+        # Verify no tools were passed (single-call, no tool use)
+        call_kwargs = MockClient.return_value.messages.create.call_args
+        assert "tools" not in call_kwargs.kwargs
+
+    @patch("news_sentiment.agent.anthropic.Anthropic")
+    def test_handles_code_fences(self, MockClient):
+        """Model output wrapped in markdown fences is handled."""
+        scored_json = '```json\n[{"id": "a1", "sentiment": 0.5}]\n```'
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=scored_json)],
+        )
+        MockClient.return_value.messages.create.return_value = mock_response
+
+        result = score_company_articles(
+            "TSLA", {"ticker": "TSLA"}, [{"uri": "a1", "title": "Test"}],
+        )
+        assert result[0]["id"] == "a1"
+
+
+class TestScoreMacroEvents:
+    def test_empty_articles_returns_empty(self):
+        result = score_macro_events([])
+        assert result == []
+
+    @patch("news_sentiment.agent.anthropic.Anthropic")
+    def test_single_call_scoring(self, MockClient):
+        """Verifies single API call produces scored macro events."""
+        scored_json = json.dumps([{
+            "id": "m1", "event_uri": "eng-123",
+            "event_type": "monetary_policy",
+            "headline": "Fed holds rates",
+            "source": "wsj.com", "url": "https://example.com",
+            "published_at": "2026-03-13T14:00:00Z",
+            "scored_at": "2026-03-13T15:00:00Z",
+            "sentiment_direction": -0.15,
+            "confidence": 0.9, "impact": 0.85,
+            "cluster_impacts": {
+                "Mobility & Transport": -0.10,
+                "AI & Compute": -0.15,
+                "Energy & Grid": -0.05,
+                "Supply Chain & Trade": 0.0,
+                "Consumer Demand": -0.20,
+                "Capital Markets & Rates": 0.60,
+                "Regulatory & Policy": 0.10,
+                "Healthcare & Biotech": 0.0,
+            },
+        }])
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=scored_json)],
+        )
+        MockClient.return_value.messages.create.return_value = mock_response
+
+        articles = [{"uri": "m1", "title": "Fed holds rates",
+                     "source": {"uri": "wsj.com"}, "eventUri": "eng-123"}]
+
+        result = score_macro_events(articles)
+
+        assert len(result) == 1
+        assert result[0]["event_type"] == "monetary_policy"
+        assert MockClient.return_value.messages.create.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Pipeline wrappers (single-call approach)
 # ---------------------------------------------------------------------------
 
 class TestPipelineWrappers:
-    @patch("news_sentiment.agent.run_agent")
-    def test_company_pipeline_formats_task(self, mock_run):
-        mock_run.return_value = "done"
-        run_company_pipeline("TSLA", "2026-03-12", "2026-03-13")
-        task = mock_run.call_args[0][0]
-        assert "COMPANY-SPECIFIC" in task
-        assert "TSLA" in task
-        assert "2026-03-12" in task
-        assert "compute_index" in task
+    @patch("news_sentiment.agent.compute_index")
+    @patch("news_sentiment.agent.store_scored_articles")
+    @patch("news_sentiment.agent.score_company_articles")
+    @patch("news_sentiment.agent.fetch_company_news")
+    @patch("news_sentiment.agent.get_company_profile")
+    def test_company_pipeline_orchestration(
+        self, mock_profile, mock_fetch, mock_score, mock_store, mock_index,
+    ):
+        """Company pipeline calls steps in order: profile → fetch → score → store → index."""
+        mock_profile.return_value = {
+            "ticker": "TSLA",
+            "concept_uri": "http://en.wikipedia.org/wiki/Tesla,_Inc.",
+        }
+        mock_fetch.return_value = [
+            {"uri": "a1", "title": "Test", "source": {"uri": "reuters.com"}},
+        ]
+        mock_score.return_value = [{"id": "a1", "sentiment": 0.5}]
+        mock_store.return_value = 1
+        mock_index.return_value = {
+            "ticker": "TSLA", "index_value": 0.15,
+            "company_component": 0.20, "macro_component": -0.05,
+            "article_count": 1, "macro_event_count": 0,
+        }
 
-    @patch("news_sentiment.agent.run_agent")
-    def test_macro_pipeline_formats_task(self, mock_run):
-        mock_run.return_value = "done"
-        run_macro_pipeline("2026-03-12", "2026-03-13")
-        task = mock_run.call_args[0][0]
-        assert "MACRO" in task
-        assert "fetch_macro_news" in task
-        assert "store_macro_events" in task
+        result = run_company_pipeline("TSLA", "2026-03-12", "2026-03-13")
+
+        # Verify orchestration order
+        mock_profile.assert_called_once_with("TSLA")
+        mock_fetch.assert_called_once_with(
+            "http://en.wikipedia.org/wiki/Tesla,_Inc.",
+            "2026-03-12", "2026-03-13",
+        )
+        mock_score.assert_called_once()
+        mock_store.assert_called_once_with("TSLA", [{"id": "a1", "sentiment": 0.5}])
+        mock_index.assert_called_once_with("TSLA", "2026-03-13")
+
+        # Result contains summary
+        assert "TSLA" in result
+        assert "+0.1500" in result
+
+    @patch("news_sentiment.agent.get_company_profile")
+    def test_company_pipeline_missing_profile(self, mock_profile):
+        """Pipeline returns early when profile is missing."""
+        mock_profile.return_value = None
+        result = run_company_pipeline("FAKE", "2026-03-12", "2026-03-13")
+        assert "No profile" in result
+
+    @patch("news_sentiment.agent.get_company_profile")
+    def test_company_pipeline_no_concept_uri(self, mock_profile):
+        """Pipeline returns early when profile lacks concept_uri."""
+        mock_profile.return_value = {"ticker": "FAKE"}
+        result = run_company_pipeline("FAKE", "2026-03-12", "2026-03-13")
+        assert "no concept_uri" in result
+
+    @patch("news_sentiment.agent.fetch_company_news")
+    @patch("news_sentiment.agent.get_company_profile")
+    def test_company_pipeline_no_articles(self, mock_profile, mock_fetch):
+        """Pipeline returns early when no articles found."""
+        mock_profile.return_value = {
+            "ticker": "TSLA",
+            "concept_uri": "http://en.wikipedia.org/wiki/Tesla,_Inc.",
+        }
+        mock_fetch.return_value = []
+        result = run_company_pipeline("TSLA", "2026-03-12", "2026-03-13")
+        assert "No articles" in result
+
+    @patch("news_sentiment.agent.store_macro_events")
+    @patch("news_sentiment.agent.score_macro_events")
+    @patch("news_sentiment.agent.fetch_macro_news")
+    def test_macro_pipeline_orchestration(
+        self, mock_fetch, mock_score, mock_store,
+    ):
+        """Macro pipeline calls steps in order: fetch → score → store."""
+        mock_fetch.return_value = [
+            {"uri": "m1", "title": "Fed holds", "source": {"uri": "wsj.com"}},
+        ]
+        mock_score.return_value = [{"id": "m1", "event_type": "monetary_policy"}]
+        mock_store.return_value = 1
+
+        result = run_macro_pipeline("2026-03-12", "2026-03-13")
+
+        mock_fetch.assert_called_once()
+        mock_score.assert_called_once()
+        mock_store.assert_called_once_with([{"id": "m1", "event_type": "monetary_policy"}])
+        assert "1 events" in result
+
+    @patch("news_sentiment.agent.fetch_macro_news")
+    def test_macro_pipeline_no_articles(self, mock_fetch):
+        """Macro pipeline returns early when no articles found."""
+        mock_fetch.return_value = []
+        result = run_macro_pipeline("2026-03-12", "2026-03-13")
+        assert "No macro articles" in result

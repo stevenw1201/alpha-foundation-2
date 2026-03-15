@@ -1,15 +1,19 @@
-"""Sentiment agent loop — orchestrates news fetching, scoring, and index computation.
+"""Sentiment scoring — single-call approach for company and macro pipelines.
 
-Uses the Anthropic SDK with tool use.  The agent receives tool definitions,
-decides which to call, gets results back, reasons, calls the next tool, and
-repeats until it produces a final text response.
+Replaces the multi-turn agentic loop with direct Python orchestration and
+a single Claude API call for the scoring step only.  This eliminates the
+duplicated output tokens (score once → store once) and the multi-turn context
+accumulation overhead.
+
+The old ``run_agent`` loop is preserved for backward compatibility but is no
+longer used by the pipeline functions.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import datetime
 
 import anthropic
 
@@ -24,7 +28,7 @@ MODEL = "claude-sonnet-4-20250514"
 MAX_TURNS = 25
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt  (kept for backward compat & reference — used by run_agent)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
@@ -135,7 +139,7 @@ Set cluster_impacts to 0.0 for clusters not meaningfully affected by the event.
 """
 
 # ---------------------------------------------------------------------------
-# Tool definitions (Claude tool_use format)
+# Tool definitions (Claude tool_use format — kept for run_agent backward compat)
 # ---------------------------------------------------------------------------
 
 TOOL_DEFINITIONS = [
@@ -289,13 +293,9 @@ TOOL_DEFINITIONS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Tool dispatch
+# Tool dispatch (kept for run_agent backward compat)
 # ---------------------------------------------------------------------------
 
-# Keys to drop from articles before sending to the agent.  These are
-# NewsAPI.ai enrichment fields that the agent doesn't use for scoring —
-# it produces its own article_tags and scores tag_similarity against
-# the company profile loaded via get_company_profile.
 _STRIP_KEYS = {"categories", "concepts"}
 
 
@@ -343,11 +343,16 @@ def _execute_tool(name: str, args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent loop
+# Agent loop (kept for backward compat — no longer used by pipelines)
 # ---------------------------------------------------------------------------
 
 def run_agent(task: str, *, model: str = MODEL, max_turns: int = MAX_TURNS) -> str:
     """Run the agentic loop for a given task description.
+
+    .. deprecated::
+        Kept for backward compatibility.  The pipeline functions now use
+        single-call scoring via :func:`score_company_articles` and
+        :func:`score_macro_events`.
 
     Args:
         task: The user message describing the pipeline to run.
@@ -399,50 +404,279 @@ def run_agent(task: str, *, model: str = MODEL, max_turns: int = MAX_TURNS) -> s
                 })
 
         if not tool_results:
-            # No tool calls and no end_turn — shouldn't happen, but break to be safe
             break
 
         messages.append({"role": "user", "content": tool_results})
 
-    # If we exhausted turns, return whatever text we have
     return "(Agent reached max turns without completing)"
 
 
 # ---------------------------------------------------------------------------
-# Pipeline wrappers
+# Single-call scoring prompts
+# ---------------------------------------------------------------------------
+
+_COMPANY_SCORING_PROMPT = """\
+You are a financial news sentiment scorer.  You receive a company profile and
+a batch of news articles.  Return ONLY a JSON array of scored articles — no
+commentary, no markdown fences, just the raw JSON array.
+
+FILTERING RULES:
+- Drop articles that are clearly tangential (company mentioned but not the subject).
+- Use eventUri to deduplicate — if multiple articles share the same eventUri,
+  keep only the highest-quality source (prefer Reuters, WSJ, Bloomberg, FT).
+
+For EACH article kept, produce a dict with these exact keys:
+- id: the article's "uri" field
+- ticker: "{ticker}"
+- headline: the article's "title"
+- source: the article's source.uri (e.g. "reuters.com")
+- url: the article's "url"
+- published_at: the article's "dateTimePub"
+- scored_at: "{scored_at}"
+- event_uri: the article's "eventUri" (or null)
+- article_tags: [2-5 free-form tags describing what this article covers]
+- sentiment: [-1, +1] directional impact on THIS COMPANY, not article tone
+- confidence: [0, 1] certainty of your sentiment call
+- impact: [0, 1] materiality to fundamentals/stock price
+- tag_similarity: {{
+    "level_1_score": [0, 1] overlap with L1 Trends/Themes,
+    "level_2_score": [0, 1] overlap with L2 cluster domains,
+    "combined": level_1_score * 0.6 + level_2_score * 0.4
+  }}
+- final_score: sentiment * confidence * impact * combined_similarity
+
+Sentiment guidance:
+- "Competitor bankruptcy" = positive for this company
+- "Analyst upgrades price target" = positive
+- "NHTSA opens investigation" = negative
+- "Routine quarterly update, in-line" = near zero
+
+Impact scale:
+- 0.8-1.0: CEO change, major M&A, earnings miss/beat, regulatory ruling
+- 0.5-0.7: product launch, guidance change, significant partnership
+- 0.2-0.4: analyst note, routine coverage, minor update
+- < 0.2: tangential mention
+
+Confidence scale:
+- < 0.5: ambiguous, tangential, paywalled stub
+- > 0.8: clear directional event directly about the company
+"""
+
+_MACRO_SCORING_PROMPT = """\
+You are a macro news sentiment scorer.  You receive a batch of news articles
+about macroeconomic, political, and policy events.  Return ONLY a JSON array
+of scored events — no commentary, no markdown fences, just the raw JSON array.
+
+FILTERING RULES:
+- Use eventUri to deduplicate — if multiple articles share the same eventUri,
+  keep only the highest-quality source (prefer Reuters, WSJ, Bloomberg, FT).
+
+For EACH event kept, produce a dict with these exact keys:
+- id: the article's "uri" field
+- event_uri: the article's "eventUri" (or null)
+- event_type: one of monetary_policy | fiscal_policy | trade_policy | geopolitical | regulatory | economic_data | political | other
+- headline: the article's "title"
+- source: the article's source.uri
+- url: the article's "url"
+- published_at: the article's "dateTimePub"
+- scored_at: "{scored_at}"
+- sentiment_direction: [-1, +1] overall market direction
+- confidence: [0, 1]
+- impact: [0, 1]
+- cluster_impacts: directional impact [-1, +1] for each of these 8 clusters:
+    "Mobility & Transport", "AI & Compute", "Energy & Grid",
+    "Supply Chain & Trade", "Consumer Demand", "Capital Markets & Rates",
+    "Regulatory & Policy", "Healthcare & Biotech"
+
+Think about TRANSMISSION MECHANISMS — the same event affects different sectors differently:
+- Rate hike: Capital Markets & Rates positive (banks), Consumer Demand negative
+- Tariffs on China: Supply Chain & Trade negative, domestic Manufacturing positive
+
+Set cluster_impacts to 0.0 for clusters not meaningfully affected.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Single-call scoring functions
+# ---------------------------------------------------------------------------
+
+def score_company_articles(
+    ticker: str,
+    profile: dict,
+    articles: list[dict],
+    *,
+    model: str = MODEL,
+) -> list[dict]:
+    """Score company articles in a single Claude API call.
+
+    Args:
+        ticker: Uppercase stock ticker.
+        profile: Company profile dict from :func:`get_company_profile`.
+        articles: Raw articles from :func:`fetch_company_news` (already stripped).
+        model: Anthropic model ID.
+
+    Returns:
+        List of scored article dicts ready for :func:`store_scored_articles`.
+    """
+    if not articles:
+        return []
+
+    scored_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    system = _COMPANY_SCORING_PROMPT.format(ticker=ticker, scored_at=scored_at)
+
+    user_msg = (
+        f"COMPANY PROFILE:\n{json.dumps(profile, indent=2)}\n\n"
+        f"ARTICLES TO SCORE ({len(articles)} articles):\n"
+        f"{json.dumps(articles, indent=2)}"
+    )
+
+    client = anthropic.Anthropic()
+    logger.info("Scoring %d articles for %s (single call)", len(articles), ticker)
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=16384,
+        system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+
+    text = response.content[0].text
+    return _parse_json_array(text)
+
+
+def score_macro_events(
+    articles: list[dict],
+    *,
+    model: str = MODEL,
+) -> list[dict]:
+    """Score macro news articles in a single Claude API call.
+
+    Args:
+        articles: Raw articles from :func:`fetch_macro_news` (already stripped).
+        model: Anthropic model ID.
+
+    Returns:
+        List of scored macro event dicts ready for :func:`store_macro_events`.
+    """
+    if not articles:
+        return []
+
+    scored_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    system = _MACRO_SCORING_PROMPT.format(scored_at=scored_at)
+
+    user_msg = (
+        f"MACRO ARTICLES TO SCORE ({len(articles)} articles):\n"
+        f"{json.dumps(articles, indent=2)}"
+    )
+
+    client = anthropic.Anthropic()
+    logger.info("Scoring %d macro articles (single call)", len(articles))
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=16384,
+        system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+
+    text = response.content[0].text
+    return _parse_json_array(text)
+
+
+def _parse_json_array(text: str) -> list[dict]:
+    """Extract a JSON array from model output, tolerating markdown fences."""
+    text = text.strip()
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        # Remove opening fence (```json or ```)
+        first_newline = text.index("\n")
+        text = text[first_newline + 1:]
+        # Remove closing fence
+        if text.endswith("```"):
+            text = text[:-3].rstrip()
+    return json.loads(text)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline wrappers (single-call approach)
 # ---------------------------------------------------------------------------
 
 def run_company_pipeline(
     ticker: str, from_date: str, to_date: str, *, model: str = MODEL,
 ) -> str:
-    """Run Workflow A: company-specific news pipeline for a single ticker."""
-    task = (
-        f"Run the COMPANY-SPECIFIC pipeline for {ticker}.\n"
-        f"Date range: {from_date} to {to_date}.\n\n"
-        f"Steps:\n"
-        f"1. Call get_company_profile for {ticker}\n"
-        f"2. Use the concept_uri to call fetch_company_news\n"
-        f"3. Filter and score all returned articles\n"
-        f"4. Call store_scored_articles with {ticker} and your scored articles\n"
-        f"5. Call compute_index for {ticker} with as_of_date={to_date}\n"
-        f"6. Provide a brief summary of the index result\n"
+    """Run Workflow A: company-specific news pipeline for a single ticker.
+
+    Orchestration is done in Python.  Only the scoring step calls Claude,
+    via a single API call (no multi-turn loop).
+    """
+    # Step 1: Load profile
+    logger.info("[%s] Loading company profile", ticker)
+    profile = get_company_profile(ticker)
+    if profile is None:
+        return f"No profile found for {ticker}. Skipping."
+
+    concept_uri = profile.get("concept_uri")
+    if not concept_uri:
+        return f"Profile for {ticker} has no concept_uri. Skipping."
+
+    # Step 2: Fetch news
+    logger.info("[%s] Fetching company news %s to %s", ticker, from_date, to_date)
+    raw_articles = fetch_company_news(concept_uri, from_date, to_date)
+    articles = _strip_article_metadata(raw_articles)
+    logger.info("[%s] Fetched %d articles", ticker, len(articles))
+
+    if not articles:
+        return f"No articles found for {ticker} in {from_date} to {to_date}."
+
+    # Step 3: Score (single Claude API call)
+    scored = score_company_articles(ticker, profile, articles, model=model)
+    logger.info("[%s] Scored %d articles", ticker, len(scored))
+
+    # Step 4: Store
+    stored_count = store_scored_articles(ticker, scored)
+    logger.info("[%s] Stored %d articles", ticker, stored_count)
+
+    # Step 5: Compute index
+    idx = compute_index(ticker, to_date)
+    logger.info("[%s] Index: %+.4f (company: %+.4f, macro: %+.4f)",
+                ticker, idx["index_value"],
+                idx["company_component"], idx["macro_component"])
+
+    # Step 6: Summary
+    summary = (
+        f"{ticker} sentiment index for {to_date}: {idx['index_value']:+.4f}\n"
+        f"  Company component: {idx['company_component']:+.4f} "
+        f"({idx['article_count']} articles)\n"
+        f"  Macro component: {idx['macro_component']:+.4f} "
+        f"({idx['macro_event_count']} events)"
     )
-    return run_agent(task, model=model)
+    return summary
 
 
 def run_macro_pipeline(
     from_date: str, to_date: str, *, model: str = MODEL,
 ) -> str:
-    """Run Workflow B: macro/political news pipeline (runs once per daily cycle)."""
-    task = (
-        f"Run the MACRO/POLITICAL pipeline.\n"
-        f"Date range: {from_date} to {to_date}.\n\n"
-        f"Steps:\n"
-        f"1. Call fetch_macro_news for the date range (use default categories)\n"
-        f"2. Group articles by eventUri — pick the best source per event\n"
-        f"3. Score each unique macro event with event_type, sentiment_direction,\n"
-        f"   confidence, impact, and cluster_impacts\n"
-        f"4. Call store_macro_events with your scored events\n"
-        f"5. Report how many events were processed and stored\n"
-    )
-    return run_agent(task, model=model)
+    """Run Workflow B: macro/political news pipeline (runs once per daily cycle).
+
+    Orchestration is done in Python.  Only the scoring step calls Claude,
+    via a single API call (no multi-turn loop).
+    """
+    # Step 1: Fetch macro news
+    logger.info("Fetching macro news %s to %s", from_date, to_date)
+    raw_articles = fetch_macro_news(from_date=from_date, to_date=to_date)
+    articles = _strip_article_metadata(raw_articles)
+    logger.info("Fetched %d macro articles", len(articles))
+
+    if not articles:
+        return f"No macro articles found for {from_date} to {to_date}."
+
+    # Step 2: Score (single Claude API call — dedup + scoring in one pass)
+    scored = score_macro_events(articles, model=model)
+    logger.info("Scored %d macro events", len(scored))
+
+    # Step 3: Store
+    stored_count = store_macro_events(scored)
+    logger.info("Stored %d macro events", stored_count)
+
+    # Step 4: Summary
+    return f"Macro pipeline: scored and stored {stored_count} events from {len(articles)} articles."
