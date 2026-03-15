@@ -148,7 +148,6 @@ def _normalise_article(raw: dict) -> dict:
     return {
         "uri": raw.get("uri", ""),
         "title": raw.get("title", ""),
-        "body": raw.get("body", ""),
         "url": raw.get("url", ""),
         "dateTimePub": raw.get("dateTimePub", ""),
         "source": {

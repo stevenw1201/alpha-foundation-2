@@ -223,7 +223,7 @@ class TestEdgeCases:
         )
         art = articles[0]
         assert art["uri"] == "minimal-article"
-        assert art["body"] == ""
+        assert "body" not in art
         assert art["url"] == ""
         assert art["sentiment"] is None
         assert art["eventUri"] is None

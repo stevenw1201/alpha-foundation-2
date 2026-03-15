@@ -51,8 +51,8 @@ FILTERING RULES:
 - Drop articles that are clearly tangential (company mentioned but not the subject).
 - Use eventUri to deduplicate — if multiple articles share the same eventUri,
   keep only the highest-quality source (prefer Reuters, WSJ, Bloomberg, FT).
-- Do NOT score articles with fewer than 100 characters in the body — they are
-  likely stubs or paywalled.
+- Articles are fetched as headlines only (no body text). Score based on the
+  headline, source, and metadata.
 
 SCORING METHODOLOGY:
 When you receive articles to score, output a JSON array. For each article:
@@ -300,14 +300,14 @@ def _execute_tool(name: str, args: dict) -> str:
         articles = fetch_company_news(
             args["concept_uri"], args["from_date"], args["to_date"],
         )
-        result = _trim_articles_for_context(articles)
+        result = articles
     elif name == "fetch_macro_news":
         articles = fetch_macro_news(
             category_uris=args.get("category_uris"),
             from_date=args["from_date"],
             to_date=args["to_date"],
         )
-        result = _trim_articles_for_context(articles)
+        result = articles
     elif name == "store_scored_articles":
         count = store_scored_articles(args["ticker"], args["articles"])
         result = {"stored": count}
@@ -325,27 +325,6 @@ def _execute_tool(name: str, args: dict) -> str:
         result = {"error": f"Unknown tool: {name}"}
 
     return json.dumps(result, default=str)
-
-
-# Max body length sent to the agent (chars).  Full bodies are thousands of
-# chars each — the agent only needs a lead paragraph to score sentiment.
-_MAX_BODY_CHARS = 500
-
-
-def _trim_articles_for_context(articles: list[dict]) -> list[dict]:
-    """Truncate article bodies so they fit in the context window.
-
-    The agent needs the headline, metadata, and enough of the body to make
-    a sentiment call — not the full text of every article.
-    """
-    trimmed = []
-    for art in articles:
-        out = dict(art)
-        body = out.get("body", "")
-        if len(body) > _MAX_BODY_CHARS:
-            out["body"] = body[:_MAX_BODY_CHARS] + "..."
-        trimmed.append(out)
-    return trimmed
 
 
 # ---------------------------------------------------------------------------
