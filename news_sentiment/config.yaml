@@ -4,7 +4,7 @@
 newsapi_key: "71675ed1-582f-4082-839b-1612cd9284d6"
 newsapi_base_url: "https://eventregistry.org/api/v1"
 default_lang: "eng"
-source_rank_percentile: [0, 80]
+source_rank_percentile: [0, 50]
 
 # Macro category URIs
 macro_categories:
